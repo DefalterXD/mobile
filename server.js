@@ -20,7 +20,7 @@ const pool = new Pool({
   user: 'postgres',
   host: 'localhost',
   database: 'student_housing',
-  password: 'admin', // ИЗМЕНИТЕ НА ВАШ ПАРОЛЬ
+  password: 'admin',
   port: 5432,
 });
 
@@ -38,7 +38,7 @@ const auth = (req, res, next) => {
   }
 };
 
-// ============ AUTH ROUTES ============ 
+// AUTH ROUTES 
 
 app.post('/api/auth/register/student', async (req, res) => {
   try {
@@ -141,7 +141,7 @@ app.post('/api/auth/login/landlord', async (req, res) => {
     }
 
     const token = jwt.sign({ id: landlord.landlord_id, type: 'landlord' }, JWT_SECRET);
-    console.log('✅ Login successful');
+    console.log('Login successful');
 
     res.json({
       token,
@@ -152,7 +152,7 @@ app.post('/api/auth/login/landlord', async (req, res) => {
         last_name: landlord.last_name,
         phone: landlord.phone,
         company_name: landlord.company_name,
-        rating: landlord.rating || 4.0, // ДОБАВЛЕНО: по умолчанию 4.0
+        rating: landlord.rating || 4.0,
         userType: 'landlord'
       }
     });
@@ -162,7 +162,79 @@ app.post('/api/auth/login/landlord', async (req, res) => {
   }
 });
 
-// ============ PROPERTIES ROUTES ============
+// PROPERTIES ROUTES
+
+app.put('/api/profile/update', auth, async (req, res) => {
+    try {
+        const { id, type } = req.user; // Берем данные из ТОКЕНА (безопасно)
+        // Приводим ключи с фронтенда к единому стандарту
+        const { firstName, lastName, avatarUrl, phone, companyName, university } = req.body;
+        
+        console.log(`Обновление профиля для ${type}, ID: ${id}`);
+
+        let result;
+        if (type === 'student') {
+            result = await pool.query(
+                `UPDATE students 
+                 SET first_name = $1, last_name = $2, avatar_url = $3, university = $4
+                 WHERE student_id = $5 
+                 RETURNING student_id, first_name, last_name, email, university, avatar_url`,
+                [firstName, lastName, avatarUrl, university, id]
+            );
+        } else {
+            // Для владельца
+            result = await pool.query(
+                `UPDATE landlords 
+                 SET first_name = $1, last_name = $2, avatar_url = $3, phone = $4, company_name = $5
+                 WHERE landlord_id = $6 
+                 RETURNING landlord_id, first_name, last_name, email, phone, company_name, avatar_url, rating`,
+                [firstName, lastName, avatarUrl, phone, companyName, id]
+            );
+        }
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: "Пользователь не найден" });
+        }
+
+        // Формируем чистый объект ответа, чтобы фронтенд не сходил с ума
+        const updatedUser = { 
+            ...result.rows[0], 
+            userType: type // Явно прописываем тип из токена
+        };
+        
+        console.log("✅ Профиль обновлен:", updatedUser.first_name);
+        res.json(updatedUser);
+    } catch (error) {
+        console.error("🔥 Ошибка обновления профиля:", error.message);
+        res.status(500).json({ error: 'Ошибка сервера при обновлении' });
+    }
+});
+
+// В server.js
+app.put('/api/profile/update-landlord', async (req, res) => {
+    console.log("Запрос получен!", req.body); // Добавь это для отладки
+    try {
+        const { landlord_id, first_name, last_name, phone, company_name, avatar_url } = req.body;
+        
+        // ВАЖНО: Убедись, что колонка в БД называется именно landlord_id, а не id
+        const result = await pool.query(
+            `UPDATE landlords 
+             SET first_name = $1, last_name = $2, phone = $3, company_name = $4, avatar_url = $5 
+             WHERE landlord_id = $6 
+             RETURNING *`,
+            [first_name, last_name, phone, company_name, avatar_url, landlord_id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: "Владелец не найден" });
+        }
+
+        res.json(result.rows[0]);
+    } catch (err) {
+        console.error("Ошибка SQL:", err.message);
+        res.status(500).json({ error: "Ошибка сервера" });
+    }
+});
 
 app.get('/api/properties', async (req, res) => {
   try {
@@ -297,7 +369,7 @@ app.get('/api/properties/:id', async (req, res) => {
   }
 });
 
-// ============ CHAT ROUTES ============
+// CHAT ROUTES 
 
 app.get('/api/chat/conversations', auth, async (req, res) => {
   try {
@@ -305,9 +377,11 @@ app.get('/api/chat/conversations', auth, async (req, res) => {
     let query;
 
     if (type === 'student') {
+      // Для студента вытягиваем имя и АВАТАРКУ лендлорда
       query = `
         SELECT c.*, 
                l.first_name || ' ' || l.last_name as landlord_name,
+               l.avatar_url as landlord_avatar,
                p.address,
                (SELECT message_text FROM chat_messages 
                 WHERE conversation_id = c.conversation_id 
@@ -319,9 +393,11 @@ app.get('/api/chat/conversations', auth, async (req, res) => {
         ORDER BY c.updated_at DESC
       `;
     } else {
+      // Для лендлорда вытягиваем имя и АВАТАРКУ студента
       query = `
         SELECT c.*, 
                s.first_name || ' ' || s.last_name as student_name,
+               s.avatar_url as student_avatar,
                p.address,
                (SELECT message_text FROM chat_messages 
                 WHERE conversation_id = c.conversation_id 
@@ -337,7 +413,7 @@ app.get('/api/chat/conversations', auth, async (req, res) => {
     const result = await pool.query(query, [id]);
     res.json(result.rows);
   } catch (error) {
-    console.error(error);
+    console.error("Ошибка при получении чатов:", error);
     res.status(500).json({ error: 'Failed to fetch conversations' });
   }
 });
@@ -384,6 +460,9 @@ app.post('/api/chat/conversations', auth, async (req, res) => {
 
 // ============ FORUM ROUTES ============
 
+// ============ FORUM ROUTES ============
+
+// 1. Получение категорий
 app.get('/api/forum/categories', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -395,169 +474,187 @@ app.get('/api/forum/categories', async (req, res) => {
     `);
     res.json(result.rows);
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: 'Failed to fetch categories' });
   }
 });
 
-// Найдите и замените:
+// 2. Получение списка постов в категории
+app.get('/api/forum/posts/:categoryId', async (req, res) => {
+  const { categoryId } = req.params;
+  try {
+    const query = `
+      SELECT 
+        p.*, 
+        COALESCE(s.first_name || ' ' || s.last_name, l.first_name || ' ' || l.last_name, 'Аноним') as author_name,
+        COALESCE(s.avatar_url, l.avatar_url, '') as author_avatar,
+        (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.post_id) as comment_count,
+        (SELECT COUNT(*) FROM forum_post_likes WHERE post_id = p.post_id) as like_count
+      FROM forum_posts p
+      LEFT JOIN students s ON p.author_id = s.student_id AND p.author_type = 'student'
+      LEFT JOIN landlords l ON p.author_id = l.landlord_id AND p.author_type = 'landlord'
+      WHERE p.category_id = $1
+      ORDER BY p.is_pinned DESC, p.created_at DESC;
+    `;
+    const result = await pool.query(query, [categoryId]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("GET POSTS ERROR:", err.message);
+    res.status(500).json({ error: 'Server Error' });
+  }
+});
 
+// 3. Получение одного поста и комментариев к нему
+app.get('/api/forum/post/:postId', async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const viewerId = req.query.viewerId || null;
+    await pool.query('UPDATE forum_posts SET views = views + 1 WHERE post_id = $1', [postId]);
+
+    const postResult = await pool.query(`
+      SELECT p.*, 
+        COALESCE(s.first_name || ' ' || s.last_name, l.first_name || ' ' || l.last_name, 'Аноним') as author_name,
+        COALESCE(s.avatar_url, l.avatar_url) as author_avatar,
+        -- ПРОВЕРКА ЛАЙКА: возвращает true/false
+        EXISTS(SELECT 1 FROM forum_post_likes WHERE post_id = p.post_id AND user_id = $2) as user_liked,
+        (SELECT COUNT(*) FROM forum_post_likes WHERE post_id = p.post_id) as like_count
+      FROM forum_posts p
+      LEFT JOIN students s ON p.author_id = s.student_id AND p.author_type = 'student'
+      LEFT JOIN landlords l ON p.author_id = l.landlord_id AND p.author_type = 'landlord'
+      WHERE p.post_id = $1
+    `, [postId, viewerId]);
+
+    if (postResult.rows.length === 0) return res.status(404).json({ error: 'Post not found' });
+
+    const commentsResult = await pool.query(`
+      SELECT c.*, 
+             COALESCE(s.first_name || ' ' || s.last_name, l.first_name || ' ' || l.last_name) as author_name,
+             COALESCE(s.avatar_url, l.avatar_url) as author_avatar
+      FROM forum_comments c
+      LEFT JOIN students s ON c.author_id = s.student_id AND c.author_type = 'student'
+      LEFT JOIN landlords l ON c.author_id = l.landlord_id AND c.author_type = 'landlord'
+      WHERE c.post_id = $1 ORDER BY c.created_at ASC
+    `, [postId]);
+
+    res.json({ ...postResult.rows[0], comments: commentsResult.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Server Error' });
+  }
+});
+
+// 4. Создание поста
 app.post('/api/forum/posts', auth, async (req, res) => {
   try {
     const { categoryId, title, content } = req.body;
     const { id, type } = req.user;
-
     const result = await pool.query(`
-      INSERT INTO forum_posts (category_id, student_id, title, content, author_type, author_id)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING *
-    `, [
-      categoryId,
-      type === 'student' ? id : null,  // NULL для владельцев
-      title,
-      content,
-      type,   // 'student' или 'landlord'
-      id      // ID пользователя
-    ]);
-
+      INSERT INTO forum_posts (category_id, author_id, author_type, title, content)
+      VALUES ($1, $2, $3, $4, $5) RETURNING *
+    `, [categoryId, id, type, title, content]);
     res.json(result.rows[0]);
   } catch (error) {
-    console.error('Forum post error:', error);
     res.status(500).json({ error: 'Failed to create post' });
   }
 });
 
-// Обновите получение постов категории:
-
-app.get('/api/forum/posts/:categoryId', async (req, res) => {
-  try {
-    const { categoryId } = req.params;
-    const result = await pool.query(`
-      SELECT 
-        p.*,
-        CASE 
-          WHEN p.author_type = 'student' THEN s.first_name || ' ' || s.last_name
-          WHEN p.author_type = 'landlord' THEN l.first_name || ' ' || l.last_name
-          ELSE 'Аноним'
-        END as author_name,
-        COUNT(DISTINCT c.comment_id) as comment_count,
-        COUNT(DISTINCT lk.like_id) as like_count
-      FROM forum_posts p
-      LEFT JOIN students s ON p.author_id = s.student_id AND p.author_type = 'student'
-      LEFT JOIN landlords l ON p.author_id = l.landlord_id AND p.author_type = 'landlord'
-      LEFT JOIN forum_comments c ON p.post_id = c.post_id
-      LEFT JOIN forum_post_likes lk ON p.post_id = lk.post_id
-      WHERE p.category_id = $1
-      GROUP BY p.post_id, s.first_name, s.last_name, l.first_name, l.last_name
-      ORDER BY p.is_pinned DESC, p.created_at DESC
-    `, [categoryId]);
-    res.json(result.rows);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch posts' });
-  }
-});
-
-// Обновите получение одного поста:
-
-app.get('/api/forum/post/:postId', async (req, res) => {
+// 5. Редактирование поста
+app.put('/api/forum/post/:postId', auth, async (req, res) => {
   try {
     const { postId } = req.params;
-
-    await pool.query('UPDATE forum_posts SET views = views + 1 WHERE post_id = $1', [postId]);
-
-    const post = await pool.query(`
-      SELECT 
-        p.*, 
-        CASE 
-          WHEN p.author_type = 'student' THEN s.first_name || ' ' || s.last_name
-          WHEN p.author_type = 'landlord' THEN l.first_name || ' ' || l.last_name
-          ELSE 'Аноним'
-        END as author_name,
-        p.author_type,
-        COUNT(DISTINCT lk.like_id) as like_count
-      FROM forum_posts p
-      LEFT JOIN students s ON p.author_id = s.student_id AND p.author_type = 'student'
-      LEFT JOIN landlords l ON p.author_id = l.landlord_id AND p.author_type = 'landlord'
-      LEFT JOIN forum_post_likes lk ON p.post_id = lk.post_id
-      WHERE p.post_id = $1
-      GROUP BY p.post_id, s.first_name, s.last_name, l.first_name, l.last_name
-    `, [postId]);
-
-    const comments = await pool.query(`
-      SELECT 
-        c.*,
-        CASE 
-          WHEN c.author_type = 'student' THEN s.first_name || ' ' || s.last_name
-          WHEN c.author_type = 'landlord' THEN l.first_name || ' ' || l.last_name
-          ELSE 'Аноним'
-        END as author_name
-      FROM forum_comments c
-      LEFT JOIN students s ON c.author_id = s.student_id AND c.author_type = 'student'
-      LEFT JOIN landlords l ON c.author_id = l.landlord_id AND c.author_type = 'landlord'
-      WHERE c.post_id = $1
-      ORDER BY c.created_at ASC
-    `, [postId]);
-
-    res.json({
-      ...post.rows[0],
-      comments: comments.rows
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch post' });
+    const { title, content } = req.body; 
+    const { id } = req.user;
+    const result = await pool.query(
+      `UPDATE forum_posts 
+       SET title = $1, content = $2 
+       WHERE post_id = $3 AND author_id = $4 
+       RETURNING *`,
+      [title, content, postId, id]
+    );
+    if (result.rows.length === 0) return res.status(403).json({ error: "No permission" });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: "Error updating post" });
   }
 });
 
+// 6. Удаление поста
+app.delete('/api/forum/post/:postId', auth, async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const { id } = req.user;
+    const result = await pool.query(
+      'DELETE FROM forum_posts WHERE post_id = $1 AND author_id = $2 RETURNING *',
+      [postId, id]
+    );
+    if (result.rows.length === 0) return res.status(403).json({ error: "No permission" });
+    res.json({ message: "Deleted" });
+  } catch (err) {
+    res.status(500).json({ error: 'Error deleting post' });
+  }
+});
+
+// 7. Добавление комментария
 app.post('/api/forum/comments', auth, async (req, res) => {
   try {
     const { postId, content } = req.body;
     const { id, type } = req.user;
-
     const result = await pool.query(`
-      INSERT INTO forum_comments (post_id, student_id, content, author_type, author_id)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING *
-    `, [
-      postId,
-      type === 'student' ? id : null,  // NULL для владельцев
-      content,
-      type,  // 'student' или 'landlord'
-      id     // ID пользователя (student_id или landlord_id)
-    ]);
-
+      INSERT INTO forum_comments (post_id, author_id, author_type, content)
+      VALUES ($1, $2, $3, $4) RETURNING *
+    `, [postId, id, type, content]);
     res.json(result.rows[0]);
   } catch (error) {
-    console.error('Forum comment error:', error);
     res.status(500).json({ error: 'Failed to add comment' });
   }
 });
 
-app.post('/api/forum/posts/:postId/like', auth, async (req, res) => {
+// 8. Удаление комментария
+app.delete('/api/forum/comments/:commentId', auth, async (req, res) => {
   try {
-    const { postId } = req.params;
-    const studentId = req.user.id;
-
-    const existing = await pool.query(
-      'SELECT * FROM forum_post_likes WHERE post_id = $1 AND student_id = $2',
-      [postId, studentId]
+    const { commentId } = req.params;
+    const { id } = req.user;
+    const result = await pool.query(
+      'DELETE FROM forum_comments WHERE comment_id = $1 AND author_id = $2 RETURNING *',
+      [commentId, id]
     );
-
-    if (existing.rows.length > 0) {
-      await pool.query('DELETE FROM forum_post_likes WHERE post_id = $1 AND student_id = $2',
-        [postId, studentId]);
-      res.json({ liked: false });
-    } else {
-      await pool.query('INSERT INTO forum_post_likes (post_id, student_id) VALUES ($1, $2)',
-        [postId, studentId]);
-      res.json({ liked: true });
-    }
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to like post' });
+    if (result.rows.length === 0) return res.status(403).json({ error: "No permission" });
+    res.json({ message: "Comment deleted" });
+  } catch (err) {
+    res.status(500).json({ error: "Server Error" });
   }
 });
 
+// 9. Лайк/Дизлайк (Универсальный: user_id + user_type)
+app.post('/api/forum/posts/:postId/like', auth, async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const { id, type } = req.user; 
+
+    // Сначала ищем существующий лайк по универсальному полю user_id
+    const existing = await pool.query(
+      'SELECT * FROM forum_post_likes WHERE post_id = $1 AND user_id = $2 AND user_type = $3',
+      [postId, id, type]
+    );
+
+    if (existing.rows.length > 0) {
+      // Дизлайк
+      await pool.query(
+        'DELETE FROM forum_post_likes WHERE post_id = $1 AND user_id = $2 AND user_type = $3',
+        [postId, id, type]
+      );
+      res.json({ liked: false });
+    } else {
+      // Лайк
+      await pool.query(
+        'INSERT INTO forum_post_likes (post_id, user_id, user_type) VALUES ($1, $2, $3)',
+        [postId, id, type]
+      );
+      res.json({ liked: true });
+    }
+  } catch (error) {
+    console.error("LIKE ERROR:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
 // ============ SOCKET.IO ============
 
 io.on('connection', (socket) => {
